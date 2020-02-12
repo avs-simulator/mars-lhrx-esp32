@@ -1,3 +1,2 @@
-build/*
-!build/*.json
-!build/config
+build
+*.old
