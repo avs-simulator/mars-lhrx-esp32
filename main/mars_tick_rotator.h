@@ -27,7 +27,7 @@ static uint32_t tr_us_rshift     = 0;
 extern "C" {
 #endif
 
-IRAM_ATTR int64_t tr_get_timestamp_ticks() {
+IRAM_ATTR int64_t tr_get_tickstamp() {
     if (TR_OBJECT.cnt_low == UINT32_MAX) {
         TR_OBJECT.update = true;
         wait_for_cycles(CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ / tr_clock_mhz);
@@ -38,11 +38,11 @@ IRAM_ATTR int64_t tr_get_timestamp_ticks() {
 }
 
 IRAM_ATTR int64_t tr_get_timestamp_ns() {
-    return tr_get_timestamp_ticks() * TR_RES_NS;
+    return tr_get_tickstamp() * TR_RES_NS;
 }
 
 IRAM_ATTR int64_t tr_get_timestamp_us() {
-    return tr_get_timestamp_ticks() >> tr_us_rshift;
+    return tr_get_tickstamp() >> tr_us_rshift;
 }
 
 IRAM_ATTR int64_t tr_get_timestamp_ms() {

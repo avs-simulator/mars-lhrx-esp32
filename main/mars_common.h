@@ -13,6 +13,7 @@
 #include <esp_pthread.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
 #include <math.h>
 #include <pthread.h>
 #include <string.h>

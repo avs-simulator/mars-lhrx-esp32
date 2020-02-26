@@ -41,21 +41,31 @@
     #endif
 #endif
 
-#define LHTX_CLOCK_MHZ      (48)
-#define LHTX_CYCLE_FULL     (400000)
-#define LHTX_CYCLE_OFFSET   (16000)
-#define LHTX_BLIP_WINDOW    (192)
-#define LHTX_SWIPE_LOWER    (2)
-#define LHTX_SWIPE_UPPER    (96)
-#define LHTX_BLIP_A_X_MIDPT (3000)
-#define LHTX_BLIP_A_Y_MIDPT (3500)
-#define LHTX_BLIP_B_X_MIDPT (5000)
-#define LHTX_BLIP_B_Y_MIDPT (5500)
-#define LHRX_SWIPE_RANGE    case lhrx_swipe_lower ... lhrx_swipe_upper
-#define LHRX_BLIP_A_X_RANGE case lhrx_blip_a_x_lower ... lhrx_blip_a_x_upper
-#define LHRX_BLIP_A_Y_RANGE case lhrx_blip_a_y_lower ... lhrx_blip_a_y_upper
-#define LHRX_BLIP_B_X_RANGE case lhrx_blip_b_x_lower ... lhrx_blip_b_x_upper
-#define LHRX_BLIP_B_Y_RANGE case lhrx_blip_b_y_lower ... lhrx_blip_b_y_upper
+#define LHTX_CLOCK_MHZ       (48)
+#define LHTX_CYCLE_FULL      (400000)
+#define LHTX_CYCLE_OFFSET    (16000)
+#define LHTX_BLIP_WINDOW     (192)
+#define LHTX_SWIPE_LOWER     (2)
+#define LHTX_SWIPE_UPPER     (96)
+#define LHTX_BLIP_A_X_MIDPT  (3000)
+#define LHTX_BLIP_A_Y_MIDPT  (3500)
+#define LHTX_BLIP_B_X_MIDPT  (5000)
+#define LHTX_BLIP_B_Y_MIDPT  (5500)
+#define LHRX_QUEUE_COUNT     (128)
+#define LHRX_QUEUE_ITEM_SIZE (17)
+#define LHRX_DATA_SIZE       (20)
+#define LHRX_SWIPE_RANGE     case lhrx_swipe_lower ... lhrx_swipe_upper
+#define LHRX_BLIP_A_X_RANGE  case lhrx_blip_a_x_lower ... lhrx_blip_a_x_upper
+#define LHRX_BLIP_A_Y_RANGE  case lhrx_blip_a_y_lower ... lhrx_blip_a_y_upper
+#define LHRX_BLIP_B_X_RANGE  case lhrx_blip_b_x_lower ... lhrx_blip_b_x_upper
+#define LHRX_BLIP_B_Y_RANGE  case lhrx_blip_b_y_lower ... lhrx_blip_b_y_upper
+
+// Code style masking
+#define semaphore_static_create xSemaphoreCreateMutexStatic
+#define core_disable_interrupt  portDISABLE_INTERRUPTS
+#define core_enable_interrupt   portENABLE_INTERRUPTS
+#define queue_static_create     xQueueCreateStatic
+#define send_queue_item         xQueueSendFromISR
 
 // Lighthouse Transmitter constants
 static const int32_t lhtx_blip_a_x_lower = LHTX_BLIP_A_X_MIDPT - LHTX_BLIP_WINDOW;
@@ -82,7 +92,7 @@ static const int32_t lhrx_blip_b_y_lower = lhtx_blip_b_y_lower / lhrx_tick_div;
 static const int32_t lhrx_blip_b_y_upper = lhtx_blip_b_y_upper / lhrx_tick_div;
 static const int32_t lhrx_cycle_full     = LHTX_CYCLE_FULL / lhrx_tick_div;
 static const int32_t lhrx_cycle_offset   = LHTX_CYCLE_OFFSET / lhrx_tick_div;
-static const int32_t lhrx_deg_timespan   = lhrx_cycle_full - lhrx_cycle_offset;
+static const int32_t lhrx_deg_tickspan   = lhrx_cycle_full - lhrx_cycle_offset;
 static const int32_t lhrx_deg_360        = 360 * 1000;
 static const int32_t lhrx_deg_offset     = -180 * 1000;
 
@@ -116,29 +126,17 @@ typedef union {
 } lhrx_data_t;
 #pragma pack(pop)
 
-static_assert(sizeof(lhrx_data_t) == 20, "Invalid size of lhrx_data_t!");
+static_assert(sizeof(lhrx_data_t) == LHRX_DATA_SIZE, "Invalid size of lhrx_data_t!");
 
 #pragma pack(push, 1)
 typedef struct {
-    size_t                   target_chip;
-    lhrx_pending_action_enum pending_action;
-    int64_t                  blip_a_risen_timestamp;
-    int64_t                  swipe_risen_timestamp;
-    int64_t                  swipe_width;
-} lhrx_pending_data_t;
+    uint8_t target_chip;
+    int64_t rise_tickstamp;
+    int64_t fall_tickstamp;
+} lhrx_queue_item_t;
 #pragma pack(pop)
 
-static_assert(sizeof(lhrx_pending_data_t) == 32, "Invalid size of lhrx_pending_data_t!");
-
-#pragma pack(push, 1)
-typedef struct {
-    size_t  target_chip;
-    int64_t rise_timestamp;
-    int64_t fallen_timestamp;
-} lhrx_signal_queue_item_t;
-#pragma pack(pop)
-
-static_assert(sizeof(lhrx_signal_queue_item_t) == 20, "Invalid size of lhrx_signal_queue_item_t!");
+static_assert(sizeof(lhrx_queue_item_t) == LHRX_QUEUE_ITEM_SIZE, "Invalid size of lhrx_queue_item_t!");
 
 #if LHRX_ENABLED
     #if USE_TS4231
@@ -172,10 +170,13 @@ static gpio_num_t lhrx_pins[LHRX_ENABLED_CHIPS] = {
     LHRX_3_E,
         #endif
 };
-static lhrx_data_t       lhrx_data[LHRX_ENABLED_CHIPS] = {0};
-static SemaphoreHandle_t lhrx_data_mutex               = NULL;
-static StaticSemaphore_t lhrx_mutex_buffer             = {0};
     #endif
+static lhrx_data_t       lhrx_data[LHRX_ENABLED_CHIPS]                              = {0};
+static StaticSemaphore_t lhrx_mutex_buffer                                          = {0};
+static SemaphoreHandle_t lhrx_data_mutex                                            = NULL;
+static uint8_t           lhrx_queue_buffer[LHRX_QUEUE_ITEM_SIZE * LHRX_QUEUE_COUNT] = {0};
+static StaticQueue_t     lhrx_queue                                                 = {0};
+static QueueHandle_t     lhrx_queue_handle                                          = NULL;
 #endif
 
 #ifdef __cplusplus
@@ -202,14 +203,21 @@ static inline void lhrx_reset_state(lhrx_wait_state_enum *__restrict__ wait_stat
     *wait_state = LHRX_WAIT_BLIP_A;
 }
 
-static inline void lhrx_process_data(lhrx_pending_data_t *__restrict__ pending_data) {
-    lhrx_data_t *data_ref               = &lhrx_data[pending_data->target_chip];
-    int32_t      blip_a_risen_timestamp = pending_data->blip_a_risen_timestamp;
-    int32_t      swipe_timestamp        = pending_data->swipe_risen_timestamp + pending_data->swipe_width / 2;
-    int64_t      swipe_tick_degree      = lhrx_cycle_offset + (int64_t)(swipe_timestamp - blip_a_risen_timestamp);
-    int32_t      swipe_degree           = (int32_t)(lhrx_deg_offset + ((lhrx_deg_360 * swipe_tick_degree) / lhrx_deg_timespan));
+static inline bool lhrx_fill_data(lhrx_pending_action_enum pending_action,
+                                  uint8_t                  lhrx_id,
+                                  int64_t                  blip_a_rise_tickstamp,
+                                  int64_t                  swipe_rise_tickstamp,
+                                  int64_t                  swipe_fall_tickstamp) {
+    lhrx_data_t *data_ref           = &lhrx_data[lhrx_id];
+    int32_t      swipe_tickstamp    = (int32_t)((swipe_fall_tickstamp + swipe_rise_tickstamp) / 2);
+    int32_t      swipe_deg_tickspan = (int32_t)(lhrx_cycle_offset + swipe_tickstamp - blip_a_rise_tickstamp);
+    if (swipe_deg_tickspan > lhrx_deg_tickspan) {
+        // Means the detection loop somehow missed the expected swipe
+        return false;
+    }
+    int32_t swipe_degree = (int32_t)(lhrx_deg_offset + ((lhrx_deg_360 * swipe_deg_tickspan) / lhrx_deg_tickspan));
     xSemaphoreTake(lhrx_data_mutex, portMAX_DELAY);
-    switch (pending_data->pending_action) {
+    switch (pending_action) {
         case LHRX_UPDATE_A_X_ANGLE:
             data_ref->angles.a_x       = swipe_degree;
             data_ref->angles.valid_a_x = true;
@@ -230,6 +238,7 @@ static inline void lhrx_process_data(lhrx_pending_data_t *__restrict__ pending_d
             break;
     }
     xSemaphoreGive(lhrx_data_mutex);
+    return true;
 }
 
 static void *lhrx_processing_loop(void *__restrict__ shared_state) {
@@ -237,11 +246,12 @@ static void *lhrx_processing_loop(void *__restrict__ shared_state) {
 }
 
 static void *lhrx_detection_loop(void *__restrict__ shared_state) {
-    portDISABLE_INTERRUPTS();
-    bool                     signal_level                         = false;
-    bool                     lhrx_level[LHRX_ENABLED_CHIPS]       = {0};
-    int64_t                  lhrx_rise_temp[LHRX_ENABLED_CHIPS]   = {0};
-    lhrx_signal_queue_item_t lhrx_signal_data[LHRX_ENABLED_CHIPS] = {0};
+    core_disable_interrupt();
+    BaseType_t        task_switch_signal                   = pdFALSE;
+    bool              signal_level                         = false;
+    bool              lhrx_level[LHRX_ENABLED_CHIPS]       = {0};
+    int64_t           lhrx_rise_temp[LHRX_ENABLED_CHIPS]   = {0};
+    lhrx_queue_item_t lhrx_signal_data[LHRX_ENABLED_CHIPS] = {0};
     while (true) {
         for (size_t i = 0; i < LHRX_ENABLED_CHIPS; ++i) {
     #if USE_TS4231
@@ -250,22 +260,24 @@ static void *lhrx_detection_loop(void *__restrict__ shared_state) {
             signal_level = !gpio_get_level(lhrx_pins[i]);
     #endif
             if (lhrx_level[i] && !signal_level) {
-                lhrx_level[i]                        = signal_level;
-                lhrx_signal_data[i].target_chip      = i;
-                lhrx_signal_data[i].rise_timestamp   = lhrx_rise_temp[i];
-                lhrx_signal_data[i].fallen_timestamp = tr_get_timestamp_ticks();
+                lhrx_level[i]                      = signal_level;
+                lhrx_signal_data[i].target_chip    = i;
+                lhrx_signal_data[i].rise_tickstamp = lhrx_rise_temp[i];
+                lhrx_signal_data[i].fall_tickstamp = tr_get_tickstamp();
+                send_queue_item(lhrx_queue_handle, &lhrx_signal_data[i], &task_switch_signal);
             } else if (!lhrx_level[i] && signal_level) {
                 lhrx_level[i]     = signal_level;
-                lhrx_rise_temp[i] = tr_get_timestamp_ticks();
+                lhrx_rise_temp[i] = tr_get_tickstamp();
             }
         }
     }
-    portENABLE_INTERRUPTS();
+    core_enable_interrupt();
     return NULL;
 }
 
 static inline bool lhrx_init() {
-    lhrx_data_mutex = xSemaphoreCreateMutexStatic(&lhrx_mutex_buffer);
+    lhrx_data_mutex   = semaphore_static_create(&lhrx_mutex_buffer);
+    lhrx_queue_handle = queue_static_create(LHRX_QUEUE_COUNT, LHRX_QUEUE_ITEM_SIZE, lhrx_queue_buffer, &lhrx_queue);
     for (uint8_t i = 0; i < LHRX_ENABLED_CHIPS; ++i) {
     #if USE_TS4231
         if (!ts_init(&lhrx_chips[i], lhrx_pins[i][0], lhrx_pins[i][1])) {
@@ -313,7 +325,7 @@ static inline bool lhrx_configure() {
 }
 
 static inline bool lhrx_monitor() {
-    // Timestamp Processing Thread
+    // Tickstamp Processing Thread
     pthread_t         processing_thread        = 0;
     esp_pthread_cfg_t processing_thread_config = esp_pthread_get_default_config();
     processing_thread_config.pin_to_core       = PRO_CPU_NUM;
