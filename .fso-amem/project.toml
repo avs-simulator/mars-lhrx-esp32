@@ -1,0 +1,6 @@
+[project]
+name = "avs-mars-lhrx-esp32"
+slug = "avs-mars-lhrx-esp32"
+
+[amem]
+server = "https://amem.flusci.org"
